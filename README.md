@@ -1,110 +1,113 @@
-# Databricks RAG with Mosaic AI — Production Deployment Layer
+# Databricks RAG with Mosaic AI — Portfolio Project
 
 > **Author:** Ravi Amaraweera · Senior Data Architect / Analytics Engineer  
-> **Part of the portfolio series:** `databricks_rag_with_vectorSearch` (V1) → this repo (V2)
+> **Stack:** Databricks · Unity Catalog · Mosaic AI · Vector Search · LangChain · MLflow  
+> **Data:** Apache Airflow open-source documentation (Apache 2.0 licence — free to use)
+
+A two-notebook, end-to-end Retrieval-Augmented Generation (RAG) system built entirely on the Databricks Lakehouse platform. It ingests technical documentation, builds a semantic vector index, and exposes the resulting agent as a live REST API with a shareable chat UI — all within the Databricks free trial ($400 credits).
 
 ---
 
-## What This Project Is
-
-This project demonstrates a **production-grade RAG (Retrieval-Augmented Generation) pipeline** built entirely on the Databricks Lakehouse Platform using the Mosaic AI stack.
-
-It answers the question:  
-> *"I've built a RAG chain in a notebook. How do I turn it into a versioned, monitored, deployed product?"*
-
-The answer is this notebook.
-
----
-
-## Architecture: V1 → V2 Pipeline
+## Architecture
 
 ```
-V1 (databricks_rag_vector_search.ipynb)
-──────────────────────────────────────────
-  Apache Airflow Docs
-       │
-       ▼
-  Delta Table (Unity Catalog)   ←── CDF-enabled, append-safe
-       │
-       ▼
-  Databricks Vector Search      ←── Delta Sync Index (BGE Large embeddings)
-       │
-       ▼
-  LangChain QA Chain            ←── In-notebook prototype
-       │
-       ▼ (V2 picks up here)
-
-V2 (databricks_rag_mosaic_ai_v2.ipynb)
-──────────────────────────────────────────
-  mlflow.pyfunc.ChatModel       ←── Standardised OpenAI-compatible interface
-       │
-       ▼
-  MLflow Experiment Run         ←── Every iteration tracked with run_id
-       │
-       ▼
-  Unity Catalog Model Registry  ←── Version 1, Version 2 … (rollback-safe)
-       │
-       ▼
-  agents.deploy()               ←── One-liner: serverless endpoint + Review App
-       │
-       ├──► /invocations REST API   ←── Any app can call this over HTTP
-       ├──► Review App Chat UI      ←── Shareable, no Databricks login needed
-       └──► MLflow Traces           ←── RETRIEVER + LLM spans for debugging
-                │
-                ▼
-           Agent Evaluation        ←── LLM judges: groundedness, relevance, precision
+ Raw docs (web)                      Databricks Lakehouse
+ ┌──────────────┐     ingest      ┌──────────────────────────────────────────────┐
+ │ Airflow docs │ ──────────────► │  Unity Catalog (rag_portfolio.doc_search)    │
+ │ (HTML pages) │                 │  ┌───────────────────────────────────────┐   │
+ └──────────────┘                 │  │  Delta Table: airflow_docs_chunks     │   │
+                                  │  │  (CDF enabled, source of truth)       │   │
+                                  │  └────────────────┬──────────────────────┘   │
+                                  │                   │ Delta Sync               │
+                                  │  ┌────────────────▼──────────────────────┐   │
+                                  │  │  Vector Search Index                  │   │
+                                  │  │  (BGE Large embeddings, HNSW)         │   │
+                                  │  └────────────────┬──────────────────────┘   │
+                                  │                   │ semantic search           │
+                                  │  ┌────────────────▼──────────────────────┐   │
+                                  │  │  RAG Chain (LangChain + Databricks)   │   │
+                                  │  │  Retriever → Prompt → LLM             │   │
+                                  │  └────────────────┬──────────────────────┘   │
+                                  │                   │ MLflow ChatModel          │
+                                  │  ┌────────────────▼──────────────────────┐   │
+                                  │  │  Model Serving Endpoint (scale-to-0)  │   │
+                                  │  │  REST API + Review App chat UI        │   │
+                                  │  └───────────────────────────────────────┘   │
+                                  └──────────────────────────────────────────────┘
 ```
-
----
-
-## What V2 Adds Over V1
-
-| Capability | Tool | Business value |
-|---|---|---|
-| Model versioning | MLflow + Unity Catalog | Rollback to any previous chain version |
-| Live REST API | `agents.deploy()` → Serverless endpoint | Any application can call the RAG chain |
-| Scale-to-zero serving | Databricks Serverless | Zero idle cost (unlike always-on VS endpoint) |
-| Shareable chat UI | Mosaic AI Review App | Stakeholder demos with no Databricks login |
-| Observability | MLflow Tracing | Debug retrieval vs generation failures |
-| Quality scoring | Agent Evaluation | Objective groundedness and relevance scores |
-
----
-
-## Prerequisites
-
-### 1 — Run V1 first
-This notebook **builds on top of** `databricks_rag_vector_search.ipynb`.  
-Before starting V2, confirm these V1 resources exist:
-
-| Resource | Expected name |
-|---|---|
-| Vector Search endpoint | `rag-portfolio-endpoint` |
-| Vector Search index | `rag_portfolio.doc_search.airflow_docs_index` |
-| Unity Catalog | `rag_portfolio.doc_search` |
-
-### 2 — Databricks workspace
-| Requirement | Minimum |
-|---|---|
-| Databricks Runtime | 15.4 LTS ML or above |
-| Cluster | Single-node, 16 GB RAM (i3.xlarge or equivalent) |
-| Unity Catalog | Enabled (`CREATE MODEL`, `USE CATALOG` permissions) |
-| Foundation Model APIs | Enabled (Workspace Settings → Machine Learning) |
-
-### 3 — Permissions
-`CREATE MODEL` on `rag_portfolio.doc_search`  
-`USE CATALOG` on `rag_portfolio`  
-`CAN USE` on `rag-portfolio-endpoint` (Vector Search)
 
 ---
 
 ## Repository Structure
 
 ```
-databricks_rag_mosaic_ai/
-├── databricks_rag_mosaic_ai_v2.ipynb    ← Enhanced notebook (this repo)
-├── README.md                            ← Developer reference (this file)
-└── GETTING_STARTED.md                   ← Beginner walkthrough
+├── databricks_rag_vector_search.ipynb    # V1 — data ingestion, vector index, LangChain chain
+├── databricks_rag_mosaic_ai_v2.ipynb     # V2 — MLflow, Model Serving, Agent Evaluation
+├── README.md                             # Developer reference (this file)
+└── GETTING_STARTED.md                    # Beginner-friendly walkthrough
 ```
+
+---
+
+## Prerequisites
+
+| Requirement | Detail |
+|---|---|
+| Databricks Runtime | DBR 14.3 LTS ML or higher |
+| Databricks cluster | Single-node, 14GB RAM minimum (e.g. i3.xlarge or equivalent) |
+| Unity Catalog | Enabled on your workspace (default on all new workspaces) |
+| Permissions | `CREATE CATALOG`, `CREATE SCHEMA`, `CREATE TABLE` on Unity Catalog |
+| Vector Search | Databricks Vector Search enabled on workspace |
+| Foundation Model APIs | Enabled — confirm in Serving tab |
+| Credits | ~$5-$15 within the Databricks $400 free trial |
+
+---
+
+## Quickstart
+
+### Step 1 — Clone the repo into your Databricks workspace
+
+```bash
+# In a Databricks terminal or Repos tab:
+git clone https://github.com/ramaraweera/databricks_rag_mosaic_ai.git
+```
+
+Or: **Workspace → Repos → Add Repo → paste this URL**.
+
+### Step 2 — Run V1: Data Ingestion + Vector Index
+
+Open `databricks_rag_vector_search.ipynb` and run cells top-to-bottom.
+
+| Cell range | What happens | Approx. time |
+|---|---|---|
+| 1–3 | Install packages, set config | 3 min |
+| 4–7 | Scrape and chunk Airflow docs | 5 min |
+| 8–10 | Create Unity Catalog + Delta Table | 2 min |
+| 11–13 | Create Vector Search endpoint + index | 8–15 min |
+| 14–16 | Build LangChain chain, test queries | 2 min |
+| 17–18 | Batch evaluation, save to Delta | 3 min |
+| 19 | *(Optional)* Cleanup | — |
+
+> **Wait for Vector Search index status = ONLINE before proceeding to V2.**
+
+### Step 3 — Run V2: Mosaic AI Production Layer
+
+Open `databricks_rag_mosaic_ai_v2.ipynb` and run cells top-to-bottom.
+
+| Cell | What happens | Approx. time |
+|---|---|---|
+| 1 | Install Mosaic AI packages | 3 min |
+| 2–3 | Set variables, create MLflow experiment | 1 min |
+| 4 | Reconnect Vector Search + rebuild chain | 1 min |
+| 5–6 | Wrap chain as MLflow PyFunc, local test | 1 min |
+| 7–8 | Log + register model in Unity Catalog | 2 min |
+| 9–10 | Deploy to Model Serving endpoint | 5–8 min |
+| 11 | Test live REST API | 1 min |
+| 12 | Add MLflow Tracing | 1 min |
+| 13–15 | Agent Evaluation with LLM judges | 3 min |
+| 16 | Explore Review App | — |
+| 17 | Improve prompt, re-deploy V2 | 5 min |
+| 18 | *(Commented out)* Cleanup | — |
 
 ---
 
@@ -112,152 +115,89 @@ databricks_rag_mosaic_ai/
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| Data store | Delta Lake (Unity Catalog) | Source-of-truth for document chunks |
-| Embeddings | BGE Large EN (Databricks Foundation Model API) | Semantic vector encoding |
-| Vector store | Databricks Vector Search (Delta Sync) | Low-latency semantic retrieval |
-| LLM | `databricks-gpt-oss-20b` (Foundation Model API) | Generation (~$1.00/1M tokens) |
-| Chain | LangChain + `SimpleRetrievalQA` | Retrieve → Prompt → Generate |
-| Model packaging | `mlflow.pyfunc.ChatModel` | OpenAI-compatible interface |
-| Model registry | MLflow + Unity Catalog | Version history and governance |
-| Deployment | `databricks.agents.deploy()` | Serverless endpoint + Review App |
-| Observability | MLflow Tracing | RETRIEVER and LLM spans |
-| Evaluation | Mosaic AI Agent Evaluation | Groundedness, relevance, precision |
-
----
-
-## Quickstart
-
-```bash
-# 1. Clone this repo
-git clone https://github.com/ramaraweera/databricks_rag_mosaic_ai.git
-
-# 2. Import the notebook into Databricks
-#    Workspace → Import → From URL or file
-#    Select: databricks_rag_mosaic_ai_v2.ipynb
-
-# 3. Attach to a 15.4 LTS ML cluster
-
-# 4. Run cells top-to-bottom
-#    Cell 1 installs packages (kernel restarts — this is expected)
-#    Cell 2 sets configuration constants — update if your names differ
-#    Cells 3–9 build, log, register, and deploy the chain
-#    Cell 18 (cleanup) is commented out by design
-```
-
-### Timing
-
-| Cell range | Step | Typical time |
-|---|---|---|
-| 1 | Package install + kernel restart | 1–2 min |
-| 2–4 | Config + chain rebuild | < 1 min |
-| 5–6 | Model file + local test | < 1 min |
-| 7 | `mlflow.pyfunc.log_model` | 1–3 min |
-| 8 | Unity Catalog model registration | < 1 min |
-| 9–10 | `agents.deploy()` + wait for READY | 5–10 min |
-| 11 | Live API test | < 1 min |
-| 12 | MLflow Tracing | < 1 min |
-| 13–15 | Evaluation dataset + scoring | 2–4 min |
-| 16–17 | Review App + V2 improvement | demo only |
+| Storage | Delta Lake + Unity Catalog | Versioned source-of-truth for document chunks |
+| Change tracking | Change Data Feed (CDF) | Incremental sync from Delta to Vector Search |
+| Embeddings | `databricks-bge-large-en` | Text → vector representation |
+| Vector store | Databricks Vector Search (Delta Sync) | ANN similarity search |
+| LLM | `databricks-gpt-oss-20b` | Response generation (cheapest Foundation Model) |
+| Chain | LangChain + `DatabricksVectorSearch` | Retrieve → Prompt → Generate pipeline |
+| Model packaging | `mlflow.pyfunc.ChatModel` | OpenAI-compatible model interface |
+| Model registry | MLflow + Unity Catalog | Versioned model artefacts with access control |
+| Serving | Mosaic AI Model Serving (serverless) | Scale-to-zero REST API |
+| Review UI | Mosaic AI Review App | Shareable chat UI (no Databricks login needed) |
+| Observability | MLflow Tracing | Per-request RETRIEVER + LLM span recording |
+| Evaluation | Mosaic AI Agent Evaluation | Groundedness, relevance, retrieval precision |
 
 ---
 
 ## Customising for Your Own Data
 
-The only required changes to run this on a different knowledge base:
+To adapt this system to a different knowledge base:
 
-| Cell | Variable | Change to |
-|---|---|---|
-| 2 | `CATALOG`, `SCHEMA` | Your Unity Catalog names |
-| 2 | `VS_ENDPOINT`, `VS_INDEX` | Your V1 Vector Search names |
-| 2 | `MODEL_NAME` | Your desired Unity Catalog model path |
-| 4 | `columns=["text", "source", "doc_type"]` | Your Delta table column names |
-| 4 | Prompt template | Domain-specific instructions |
-| 13 | `eval_dataset` | QA pairs from your own knowledge domain |
+1. **Replace the data source** — edit the scraping/loading cells in V1 with your own URLs or file paths.
+2. **Update chunk size** — adjust `chunk_size` and `chunk_overlap` in the splitter cell based on your document length.
+3. **Rename the catalog/schema** — update `CATALOG` and `SCHEMA` in Cell 2 of both notebooks.
+4. **Update the system prompt** — replace "Apache Airflow" references in the prompt template with your domain.
+5. **Update the evaluation dataset** — replace the 5 QA pairs in V2 Cell 13 with domain-specific questions.
 
----
-
-## Cost Reference
-
-All figures are approximate. Costs depend on Databricks pricing tier and region.
-
-| Resource | Idle cost | Active cost |
-|---|---|---|
-| Vector Search endpoint (V1) | ~$0.28/hr always-on | Same |
-| Model Serving endpoint (V2) | **$0.00** (scale-to-zero) | ~$0.07–$0.15/1K tokens |
-| `databricks-gpt-oss-20b` | — | ~$1.00/1M input tokens |
-| `databricks-bge-large-en` | — | ~$1.43/1M tokens |
-
-**Total estimated cost for this notebook: $5–$15 within Databricks $400 free trial.**
-
-> Delete the Vector Search endpoint (V1, Cell 19) when done. It is the only always-on resource.
+No other changes are required.
 
 ---
 
 ## Key Design Decisions
 
-### Why `mlflow.pyfunc.ChatModel` instead of `mlflow.pyfunc.PythonModel`?
-`ChatModel` generates an OpenAI-compatible `/invocations` schema automatically.  
-This means the endpoint works with any OpenAI SDK client — no custom parsing needed.
+**Why no LlamaIndex or Hugging Face?**  
+Pure Databricks-native stack (Vector Search, Foundation Model APIs, MLflow, agents.deploy) keeps all components inside one governance boundary — Unity Catalog access controls apply to the data, the model, and the endpoint simultaneously.
 
-### Why `agents.deploy()` instead of standard `mlflow.deployments`?
-`agents.deploy()` does three things in one call: creates the serving endpoint, enables  
-scale-to-zero, and provisions the Review App. Standard deployment requires three separate API calls.
+**Why Delta Sync index (not Direct Access)?**  
+Delta Sync automatically propagates chunk-level changes from the Delta Table to the vector index using CDF. Incremental re-indexing is free and requires no code.
 
-### Why `SimpleRetrievalQA` instead of `langchain.chains.RetrievalQA`?
-`RetrievalQA` was removed in LangChain 1.x. `SimpleRetrievalQA` is a self-contained  
-drop-in replacement that avoids the deprecated import and produces identical behaviour.
+**Why Apache Airflow docs?**  
+Apache 2.0 licence — no copyright or attribution issues. The content is deeply technical, which creates a meaningful retrieval challenge (shallow embedding matches on "Airflow" alone won't produce correct answers).
 
-### Why code-based model logging (`python_model="/tmp/rag_chain_model.py"`)?
-Code-based logging (MLflow 2.12+) serialises the Python file rather than pickling a  
-class instance. This is more reproducible and avoids dependency conflicts between  
-notebook and serving endpoint environments.
+**Why `databricks-gpt-oss-20b` as the LLM?**  
+The cheapest Foundation Model API option — typically $0.001-$0.003 per 1K tokens. Stays well within the $400 free trial for development and evaluation.
 
 ---
 
 ## Evaluation Output Schema
 
-Each row in the evaluation results DataFrame contains:
+V1 persists evaluation results to `rag_portfolio.doc_search.eval_results`:
 
-| Column | Type | Description |
-|---|---|---|
-| `question` | str | The question sent to the chain |
-| `answer` | str | The chain's generated answer |
-| `groundedness_score` | int (1–5) | Word-overlap proxy for answer groundedness |
-| `sources` | list[str] | Source document names used for the answer |
-
-**Target:** average `groundedness_score` ≥ 4.0. Scores below 3 indicate retrieval or generation problems.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---|---|---|
-| `ModuleNotFoundError: rag_chain_model` | Cell 5 not yet run | Re-run Cell 5 |
-| `ENDPOINT_NOT_FOUND` in Cell 4 | V1 Vector Search endpoint deleted | Re-run Cells 7–10 in V1 notebook |
-| `mlflow.register_model` permission error | Missing `CREATE MODEL` | Add permission in Unity Catalog → rag_portfolio |
-| `agents.deploy()` timeout | Workspace tier limitation | Check Workspace Settings → Serving |
-| Review App URL 404 | Endpoint still provisioning | Wait for Cell 10 to print `READY` |
-| Low groundedness scores (< 3) | Wrong chunks retrieved | Increase `k` in retriever or improve prompt |
-| `FutureWarning: ChatModel is deprecated` | MLflow 3.x | Safe to ignore; use `ResponsesAgent` in MLflow 3+ |
+```
+Column               Type       Description
+----                 ----       -----------
+question             STRING     Input question
+expected_answer      STRING     Human-verified correct answer
+actual_answer        STRING     RAG chain output
+relevance_score      DOUBLE     LLM judge: 1-5, relevance to question
+groundedness_score   DOUBLE     LLM judge: 1-5, supported by retrieved context
+retrieval_source     ARRAY      Source file paths of retrieved chunks
+evaluation_date      TIMESTAMP  When the evaluation row was generated
+```
 
 ---
 
-## Portfolio Context
+## Teardown (Cost Control)
 
-This repository is part of a two-notebook portfolio series demonstrating end-to-end  
-AI engineering on Databricks by **Ravi Amaraweera**, Senior Data Architect / Analytics Engineer.
+The **Vector Search endpoint** charges ~$0.28/hr while running — the only always-on cost.
+The **Model Serving endpoint** has scale-to-zero and costs $0 when idle.
 
-| Notebook | What it shows |
-|---|---|
-| `databricks_rag_vector_search.ipynb` | Data ingestion → Delta → Vector Search → LangChain prototype |
-| `databricks_rag_mosaic_ai_v2.ipynb` | MLflow packaging → Unity Catalog → Deployed REST API → Evaluation |
+To stop all charges:
+1. Run the cleanup cell in V2 (Cell 18, uncomment first) to delete the serving endpoint.
+2. Run the cleanup cell in V1 (Cell 19, uncomment first) to delete the Vector Search endpoint.
+3. Optionally drop the Unity Catalog tables with the SQL commands shown in the cleanup cells.
 
-Together, these notebooks demonstrate the full spectrum from raw data to a monitored,  
-versioned, production AI service — a rare combined skill set across data engineering and AI engineering.
+---
+
+## About the Author
+
+**Ravi Amaraweera** is a Senior Data Architect and Analytics Engineer specialising in lakehouse architecture, data platform engineering, and AI/ML integration on cloud-native data platforms. This project demonstrates end-to-end Databricks capability from raw data ingestion through to a production-deployed RAG agent.
+
+🔗 [LinkedIn](https://www.linkedin.com/in/ravindra-amaraweera) | [GitHub](https://github.com/ramaraweera)
 
 ---
 
 ## Licence
-Data: Apache Airflow documentation (Apache 2.0)  
-Notebook: MIT
+
+Code: MIT. Documentation data (Apache Airflow): Apache 2.0.

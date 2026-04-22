@@ -1,493 +1,579 @@
-# Getting Started: Databricks RAG with Mosaic AI (V2)
+# Getting Started: Databricks RAG with Mosaic AI
 
-> **Written for:** Beginners to Databricks and MLOps  
-> **Prerequisite:** Have run `databricks_rag_vector_search.ipynb` (V1) successfully  
-> **Time to read:** ~20 minutes  
-> **Time to run:** ~30 minutes
+> A beginner-friendly walkthrough for developers new to Databricks and RAG.
+> No prior experience with vector databases or LLMs is required.
 
 ---
 
-## Before You Begin: What You Need to Know
+## Table of Contents
 
-### What is MLOps?
-MLOps (Machine Learning Operations) is the discipline of treating AI models like  
-software products — with versioning, testing, deployment, and monitoring.  
-
-Without MLOps:  
-- Your chain lives only inside a notebook
-- Nobody outside Databricks can use it
-- You cannot track whether your changes improved or degraded quality
-- There is no rollback if something breaks
-
-With MLOps (what this notebook adds):  
-- The chain is a versioned product registered in a catalogue
-- Anyone can call it via a REST API
-- Every iteration is tracked and comparable
-- You can roll back to a previous version at any time
-
-### What is MLflow?
-MLflow is an open-source platform for managing the machine learning lifecycle.  
-Think of it as version control + packaging + deployment for AI models.
-
-Key concepts you will encounter:
-- **Experiment**: a folder that groups all runs for a project
-- **Run**: one execution that produces a logged model, metrics, and metadata
-- **Model URI**: a unique address pointing to a specific logged model
-- **Registry**: a catalogue of models with version numbers
-
-### What is Unity Catalog?
-Unity Catalog is Databricks' centralised governance layer.  
-It manages databases, tables, volumes, *and* AI models — all in one place with:
-- Fine-grained access control (who can see/use each asset)
-- Data lineage (where did this data come from?)
-- Model versioning (Version 1, 2, 3 … just like a package)
-
-Think of it as the address book for everything in your Databricks workspace.
-
-### What is Mosaic AI?
-Mosaic AI is Databricks' umbrella brand for its AI engineering tools:
-- **Foundation Model APIs**: hosted LLMs and embedding models (no GPU setup needed)
-- **Vector Search**: serverless semantic search over your Delta Tables
-- **Agent Framework** (`databricks-agents`): tooling to deploy, evaluate, and monitor RAG chains
-- **Model Serving**: serverless HTTP endpoints for any MLflow model
+1. [What is RAG?](#1-what-is-rag)
+2. [What is Databricks?](#2-what-is-databricks)
+3. [Full Architecture: How All the Pieces Connect](#3-full-architecture)
+4. [V1 Notebook Walkthrough](#4-v1-notebook-walkthrough)
+5. [V2 Notebook Walkthrough](#5-v2-notebook-walkthrough)
+6. [Key Concepts Glossary](#6-key-concepts-glossary)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Next Steps](#8-next-steps)
 
 ---
 
-## The Big Picture: What This Notebook Does
+## 1. What is RAG?
+
+**The problem RAG solves:**
+
+A large language model (LLM) like GPT-4 is trained on internet data up to a cutoff date and has no knowledge of your private or specialised documents. If you ask it about your company's internal Confluence wiki, your product's custom API, or the latest Airflow release notes — it either guesses (hallucinates) or says it doesn't know.
+
+**RAG = Retrieval-Augmented Generation**
+
+Instead of relying on the LLM's baked-in knowledge, RAG retrieves the most relevant passages from YOUR documents at query time and sends them to the LLM as context.
 
 ```
-Your LangChain QA chain (built in V1)
-         │
-         ▼
-Wrap it in a standard MLflow "box"        ← Cell 5
-         │
-         ▼
-Test the box locally                      ← Cell 6
-         │
-         ▼
-Log the box to MLflow (create a Run)      ← Cell 7
-         │
-         ▼
-Register it in Unity Catalog (Version N)  ← Cell 8
-         │
-         ▼
-Deploy → live REST endpoint + Review App  ← Cell 9
-         │
-         ├── Any app calls the API         ← Cell 11
-         ├── MLflow records every call     ← Cell 12
-         └── LLM judges score quality      ← Cell 14
+Without RAG:
+  User: "How do I set task dependencies in Airflow?"
+  LLM:  "[Guesses based on training data — may be wrong or outdated]"
+
+With RAG:
+  User:       "How do I set task dependencies in Airflow?"
+  Retriever:  "[Searches your vector index → finds 4 relevant doc chunks]"
+  Prompt:     "Answer ONLY using this context: [4 chunks]\n\nQuestion: ..."
+  LLM:        "[Grounded, accurate answer based on YOUR documentation]"
 ```
 
----
-
-## Cell-by-Cell Walkthrough
-
----
-
-### Cell 1 — Install Mosaic AI Packages
-
-**What it does:** Installs two packages not present in V1:
-- `databricks-agents`: provides `agents.deploy()` — the one-liner that deploys your chain
-- `mlflow[databricks]`: adds Databricks-specific tracing and evaluation on top of base MLflow
-
-After installation, the kernel (Python process) restarts automatically.  
-**This is expected.** All variables from before the restart are gone. Start from Cell 2.
+The key components of a RAG system are:
+- **A document corpus** — the knowledge base (e.g. Airflow docs, your wiki)
+- **An embedding model** — converts text chunks into vectors (lists of numbers representing meaning)
+- **A vector store** — database that finds the most semantically similar vectors for a query
+- **An LLM** — reads the retrieved context and generates a natural-language answer
 
 ---
 
-### Cell 2 — Set Shared Variables
+## 2. What is Databricks?
 
-**What it does:** Defines all names in one place so you only need to change them here.
+Databricks is a cloud data platform built on top of Apache Spark and Delta Lake. It provides:
 
-```python
-CATALOG      = "rag_portfolio"
-SCHEMA       = "doc_search"
-MODEL_NAME   = f"{CATALOG}.{SCHEMA}.airflow_rag_agent"
-VS_ENDPOINT  = "rag-portfolio-endpoint"
-VS_INDEX     = f"{CATALOG}.{SCHEMA}.airflow_docs_index"
-LLM_ENDPOINT = "databricks-gpt-oss-20b"
-EMBED_MODEL  = "databricks-bge-large-en"
-```
-
-**Key concept — Unity Catalog three-level naming:**  
-Everything in Databricks follows the pattern `CATALOG.SCHEMA.object_name`.  
-`MODEL_NAME = "rag_portfolio.doc_search.airflow_rag_agent"` means:  
-- Catalog: `rag_portfolio` (your project's top-level namespace)  
-- Schema: `doc_search` (like a folder inside the catalog)  
-- Model name: `airflow_rag_agent` (the specific asset)
-
-**`mlflow.set_registry_uri("databricks-uc")`**: this line tells MLflow to use  
-Unity Catalog as the model registry, instead of the legacy MLflow registry.  
-Without this, `mlflow.register_model()` in Cell 8 would fail.
-
----
-
-### Cell 3 — Create an MLflow Experiment
-
-**What it does:** Creates a named folder (Experiment) in MLflow for this project.
-
-**Analogy:** An experiment is like a Git repository for model runs.  
-Each run is a commit — it captures what you did and what result you got.
-
-**Where to view it:** Left sidebar → Experiments → `airflow_rag_v2`
-
-You will see columns like: Run name, Date, Duration, and any logged metrics.  
-As you iterate (V1 chain → improved prompt → V2 chain), each becomes a new row here.
-
----
-
-### Cell 4 — Reconnect to Vector Search and Rebuild the Chain
-
-**What it does:** Re-creates the Python objects that the kernel restart in Cell 1 erased.
-
-**Why do we need to do this again?**  
-A Python kernel restart clears all in-memory variables.  
-The `llm`, `retriever`, and `qa_chain` objects from V1 are gone.  
-This cell creates identical objects using the same configuration.
-
-**New class — `SimpleRetrievalQA`:**  
-LangChain 1.x removed the old `RetrievalQA` chain class.  
-`SimpleRetrievalQA` is a lightweight replacement we wrote ourselves.  
-Pipeline:
-1. `retriever.invoke(query)` → returns top-4 most similar document chunks
-2. `prompt.format(context=..., question=...)` → builds the full prompt string
-3. `llm.invoke(prompt)` → sends prompt to LLM and gets a response
-
-**Key parameter — `temperature=0`:**  
-Setting temperature to 0 makes the LLM deterministic — it always picks the most  
-probable token rather than sampling. This is best practice for factual Q&A where  
-you want consistent, repeatable answers rather than creative variation.
-
----
-
-### Cell 5 — Wrap the Chain in an MLflow PyFunc Model Class
-
-**What it does:** Writes a Python file (`/tmp/rag_chain_model.py`) containing the  
-`RAGChainModel` class. This file is the "shipping box" MLflow uses to package and deploy your chain.
-
-**Why a file and not a class instance?**  
-MLflow serialises models for portability. A Python class instance might reference  
-objects that don't exist in the serving environment. A Python *file* that reconstructs  
-everything from scratch (in `load_context`) is fully portable.
-
-**`RAGChainModel` methods:**
-
-| Method | When called | What it does |
+| Feature | What it is | Used in this project |
 |---|---|---|
-| `load_context(context)` | Once at endpoint startup | Builds the chain from scratch using stored config |
-| `predict(context, messages, params)` | On every request | Extracts the user question, runs the chain, returns an answer |
+| **Notebooks** | Interactive code environment (Python, SQL, Scala) | All development |
+| **Unity Catalog** | Centralised data governance (tables, models, files) | Storing chunks + model registry |
+| **Delta Lake** | Open-source storage layer with ACID transactions | Source-of-truth for document chunks |
+| **Vector Search** | Managed vector database service | Similarity search over embeddings |
+| **Foundation Model APIs** | Hosted LLM endpoints (no GPU setup needed) | Embedding + generation |
+| **MLflow** | Experiment tracking + model versioning | Logging every chain iteration |
+| **Model Serving** | REST API hosting for ML models | Exposing the RAG agent as an API |
+| **Mosaic AI** | AI layer for agent evaluation, review apps | Quality scoring + demo UI |
 
-**Why inherit from `ChatModel`?**  
-`mlflow.pyfunc.ChatModel` is a subclass of `mlflow.pyfunc.PythonModel` that adds  
-an OpenAI-compatible interface. The serving endpoint will automatically accept and  
-return messages in the same format as OpenAI's Chat Completions API.
-
-**`mlflow.models.set_model(RAGChainModel)`:**  
-This line at the bottom of the file tells MLflow which class is the entry point.  
-Without it, MLflow does not know which class to instantiate when loading the model.
-
----
-
-### Cell 6 — Test the Wrapper Locally Before Logging
-
-**What it does:** Calls `predict()` directly in the notebook before committing to a full MLflow run.
-
-**Why test first?**  
-Logging a model to MLflow (Cell 7) takes 1–3 minutes and uses cluster compute.  
-Running a quick local test here catches errors in 5 seconds — before you waste time  
-on a failed logging run.
-
-If this cell produces a coherent Airflow answer, the wrapper is correct.  
-If it raises an error, fix the issue in Cell 5 before proceeding.
+**Free trial:** Databricks offers $400 in free credits. This project costs $5–$15.
 
 ---
 
-### Cell 7 — Log the Model to MLflow
+## 3. Full Architecture
 
-**What it does:** Opens an MLflow run and packages the model with all its dependencies.
-
-**Breaking down `mlflow.pyfunc.log_model()`:**
-
-```python
-mlflow.pyfunc.log_model(
-    artifact_path="rag_chain",          # folder name inside the run artefacts
-    python_model="/tmp/rag_chain_model.py", # the file (not a class!)
-    resources=[...],                    # declares external service dependencies
-    pip_requirements=[...],             # exact packages the serving env needs
-    input_example={...},               # sample request → auto-generates API schema
-)
+```
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │                         DATABRICKS WORKSPACE                            │
+ │                                                                          │
+ │  ┌──────────────┐   chunk+embed   ┌────────────────────────────────┐   │
+ │  │ Airflow Docs │ ──────────────► │  Delta Table                   │   │
+ │  │ (HTML pages) │                 │  rag_portfolio.doc_search       │   │
+ │  └──────────────┘                 │  .airflow_docs_chunks           │   │
+ │                                   │  (CDF enabled)                  │   │
+ │                                   └──────────────┬─────────────────┘   │
+ │                                                  │ Delta Sync           │
+ │                                                  ▼                      │
+ │                                   ┌──────────────────────────────────┐  │
+ │                                   │  Vector Search Index             │  │
+ │                                   │  BGE Large embeddings (1024-dim) │  │
+ │                                   │  HNSW approximate nearest-neigh  │  │
+ │                                   └──────────────┬───────────────────┘  │
+ │                                                  │ top-k chunks         │
+ │                                                  ▼                      │
+ │  User Question ──────────────► ┌──────────────────────────────────────┐ │
+ │                                │  LangChain RAG Chain                 │ │
+ │                                │  1. Embed question (BGE Large)       │ │
+ │                                │  2. Search index (k=4 chunks)        │ │
+ │                                │  3. Format prompt with context       │ │
+ │                                │  4. Call LLM (GPT-OSS-20B)           │ │
+ │                                └──────────────┬───────────────────────┘ │
+ │                                               │ MLflow ChatModel         │
+ │                                               ▼                         │
+ │                                   ┌──────────────────────────────────┐  │
+ │                                   │  Model Serving Endpoint          │  │
+ │                                   │  (serverless, scale-to-zero)     │  │
+ │                                   │  POST /invocations               │  │
+ │                                   └──────────────────────────────────┘  │
+ │                                                                          │
+ └──────────────────────────────────────────────────────────────────────────┘
+                              ▲
+              REST API calls from any application
 ```
 
-**`resources` — why is this important?**  
-When `agents.deploy()` creates a serving endpoint, it needs to know which Databricks  
-services the model depends on so it can automatically configure IAM permissions.  
-Declaring `DatabricksVectorSearchIndex` and `DatabricksServingEndpoint` here means  
-the endpoint gets access to those services automatically — no credentials needed in code.
+---
 
-**`input_example` — why include it?**  
-MLflow uses the input example to infer the model's input/output schema.  
-The serving endpoint uses this schema to generate its interactive API documentation.
+## 4. V1 Notebook Walkthrough
 
-After this cell, look in the Experiments tab — you will see a new Run with a green checkmark.
+### `databricks_rag_vector_search.ipynb`
+
+This notebook builds the foundation: getting documents in, chunked, embedded, and searchable.
 
 ---
 
-### Cell 8 — Register the Model in Unity Catalog
+### Cell 1 — Install packages
 
-**What it does:** Takes the logged model from Cell 7 and registers it in Unity Catalog  
-with a version number. Each call adds Version N+1.
+**What it does:** Installs Python libraries not included in the default Databricks ML runtime.
 
-**Difference between logging and registering:**
+**Key packages:**
+- `langchain` — framework for building LLM chains and pipelines
+- `databricks-vectorsearch` — Python client for Databricks Vector Search
+- `databricks-langchain` — Databricks-specific LangChain integrations
 
-| | Logging (Cell 7) | Registering (Cell 8) |
-|---|---|---|
-| Where stored | MLflow experiment run (ephemeral) | Unity Catalog (permanent, governed) |
-| Versioned? | By run ID only | Version 1, 2, 3 … (human-readable) |
-| Access control? | Experiment-level | Unity Catalog RBAC |
-| Can deploy from? | No | Yes (`agents.deploy()` requires a version) |
+**Why the kernel restarts:** Newly installed packages are not importable until Python is restarted. `dbutils.library.restartPython()` handles this automatically.
 
-**Where to view it:**  
-Catalog (left sidebar) → rag_portfolio → doc_search → airflow_rag_agent → Versions tab
+**Customise:** No changes needed here unless you want to pin specific library versions.
 
 ---
 
-### Cell 9 — Deploy to a Model Serving Endpoint
+### Cell 2 — Configuration variables
 
-**What it does:** Calls `agents.deploy()` — Mosaic AI's one-liner that does three things:
+**What it does:** Sets all configuration constants in one place — catalog name, schema name, endpoint name, etc.
 
-1. **Creates a serverless Model Serving endpoint**  
-   This is a live HTTPS endpoint that runs your `RAGChainModel.predict()` method  
-   on every POST request. No server management needed — Databricks handles scaling.
+**Key concept — Unity Catalog naming:**  
+Databricks Unity Catalog uses three-level naming: `catalog.schema.table_or_index`.
+This project uses `rag_portfolio.doc_search.airflow_docs_chunks`.
 
-2. **Enables scale-to-zero**  
-   Unlike the Vector Search endpoint (always-on, ~$0.28/hr), the serving endpoint  
-   drops to zero compute when no requests are coming in. You pay only during active inference.
-
-3. **Creates a Review App**  
-   A shareable chat UI at a unique URL. Recipients do not need a Databricks login.  
-   This is the "show don't tell" feature for portfolio and client demos.
-
-**Wait time:** Cell 10 polls every 30 seconds until the endpoint shows `READY`.  
-Typical wait: 5–10 minutes for a new endpoint.
+**Customise:** Change `CATALOG`, `SCHEMA`, and the endpoint names if your workspace already has conflicting names.
 
 ---
 
-### Cell 10 — Wait for the Endpoint to Be Ready
+### Cell 3 — Create the Unity Catalog and Schema
 
-**What it does:** Polls `w.serving_endpoints.get()` every 30 seconds.
+**What it does:** Creates `rag_portfolio` catalog and `doc_search` schema using SQL.
 
-You can also watch progress in the UI:  
-Serving tab (left sidebar) → your endpoint name → Status column
+**Key concept — Unity Catalog:**  
+Think of the catalog as a database server, the schema as a database, and the table as a table.  
+Unity Catalog also governs who can access each level — read, write, or manage.
 
-The endpoint goes through states: `NOT_READY → UPDATING → READY`
-
----
-
-### Cell 11 — Call the Live REST API
-
-**What it does:** Queries the deployed endpoint using `mlflow.deployments.get_deploy_client()`.
-
-**Why is this significant for the portfolio?**  
-This is the same client call an external application would make.  
-The chain is no longer a notebook experiment — it is a real service.
-
-Any of these can now call it:
-- A web app built in React or FastAPI
-- Another Databricks job
-- An Apache Airflow DAG
-- A Slack bot or Teams integration
+**What to watch:** If you get a `permission denied` error, your Databricks account may need catalog creation privileges. Ask your workspace admin.
 
 ---
 
-### Cell 12 — Add MLflow Tracing
+### Cell 4 — Scrape and load Airflow documentation
 
-**What it does:** Wraps the RAG function with `@mlflow.trace` so every call is recorded.
+**What it does:** Downloads HTML pages from the Apache Airflow documentation website and converts them to plain text.
 
-**Why tracing matters:**  
-When the chain gives a wrong answer, you need to know *why*.  
-Was it a retrieval problem (wrong chunks returned)?  
-Was it a generation problem (good chunks, but LLM misread them)?
+**Key concept — why Airflow docs?**  
+Apache 2.0 licence means we can scrape, store, and use the content freely. The docs are deeply technical, which makes them a good test for a RAG system — you can't answer questions like "What parameters does the BashOperator accept?" without actually retrieving the right page.
 
-Without tracing: you see only the wrong answer.  
-With tracing: you see every step.
-
-**What each span captures:**
-
-| Span | Contents |
-|---|---|
-| `RETRIEVER` | Query text, how many chunks returned, source file names |
-| `LLM` | Query text, how many context documents provided, answer length |
-
-**Where to view traces:**  
-Experiments → airflow_rag_v2 → Traces tab  
-Click any trace to expand it into a tree of spans with timestamps and durations.
+**Customise:** Replace the URL list with your own documentation URLs, a local folder of PDFs, or a SharePoint site.
 
 ---
 
-### Cell 13 — Create the Evaluation Dataset
+### Cell 5 — Chunk the documents
 
-**What it does:** Creates a small "golden dataset" — questions paired with known-correct answers.
+**What it does:** Splits long documents into smaller overlapping text chunks using `RecursiveCharacterTextSplitter`.
 
-**What is a golden dataset?**  
-In evaluation, a golden dataset is a set of inputs where the correct answer is  
-already known (verified by a domain expert). The evaluation framework compares  
-the chain's actual answers against these expected answers using automated judges.
+**Why chunking is necessary:**  
+Embedding models have a token limit (typically 512 tokens). A full documentation page is too long to embed as a single vector. Smaller chunks also produce more precise retrieval — the vector for a 200-word paragraph matches a question better than the vector for a 5,000-word page.
 
-**Why only 5 pairs?**  
-5 pairs is enough to demonstrate the evaluation pattern. In production you would  
-use 50–200 pairs for statistically meaningful quality scores.
-
----
-
-### Cell 14 — Run Agent Evaluation with LLM Judges
-
-**What it does:** Scores the chain's answers against the golden dataset.
-
-**What the groundedness score means:**  
-Groundedness measures whether the answer is supported by the retrieved context —  
-i.e., the chain is not hallucinating information from outside the knowledge base.
-
-| Score | Interpretation |
-|---|---|
-| 5 | Fully grounded: every claim in the answer is supported by the context |
-| 4 | Mostly grounded: minor gaps but acceptable for production |
-| 3 | Partially grounded: some claims lack context support |
-| 1–2 | Low groundedness: likely hallucinating or retrieved wrong chunks |
-
-**What to do with a low score:**
-- Score 1–2 on most questions → retriever issue: try increasing `k` (more chunks) or re-check your V1 index
-- Score 3 on specific questions → prompt issue: add more specific instructions for that question type
-- Score 4–5 → chain is performing well; try harder questions
-
----
-
-### Cell 15 — View and Understand the Evaluation Results
-
-**What it does:** Prints a formatted summary of per-question scores with a visual bar.
-
-**How to read the output:**
 ```
-Q: How do I set task dependencies in Airflow?...
-   Score  : [****-] 4/5
-   Source : best-practices.html
+Original page (3,000 words)
+        ↓
+[chunk 1: 500 chars][chunk 2: 500 chars][chunk 3: 500 chars]...
+     ←  100-char overlap  →
 ```
 
-The bar shows filled (`*`) vs empty (`-`) segments out of 5.  
-The source shows which document file contributed to the answer.  
-If the source looks wrong (e.g., a monitoring doc for a DAG design question), that  
-explains a low score — the retriever fetched an irrelevant chunk.
+**Overlap:** Each chunk shares 100 characters with the previous chunk. This prevents answers from being cut off mid-sentence at chunk boundaries.
+
+**Customise:** Adjust `chunk_size` (200–1000 depending on document density) and `chunk_overlap` (10–20% of chunk size).
+
+---
+
+### Cell 6 — Preview chunks
+
+**What it does:** Prints the first 3 chunks so you can verify the splitting is working correctly before writing to Delta.
+
+**What to check:** Do the chunks contain coherent text (not HTML tags or navigation links)? If not, improve the HTML cleaning in Cell 4.
+
+---
+
+### Cell 7 — Write chunks to a Delta Table
+
+**What it does:** Persists all chunks to `rag_portfolio.doc_search.airflow_docs_chunks` as a Delta Table with Change Data Feed enabled.
+
+**Key concept — Delta Lake:**  
+Delta is like a supercharged Parquet file — it supports ACID transactions, time travel (query past versions), and Change Data Feed (CDF). CDF tracks which rows were inserted, updated, or deleted since the last sync.
+
+**Key concept — CDF (Change Data Feed):**  
+When CDF is enabled, Databricks Vector Search can do *incremental* index updates — only re-embedding changed chunks instead of re-indexing everything. This makes updates fast and cheap.
+
+---
+
+### Cell 8 — Create the Vector Search endpoint
+
+**What it does:** Provisions a Databricks Vector Search endpoint — a managed service that hosts the HNSW index and handles similarity search requests.
+
+**Key concept — Vector Search endpoint:**  
+The endpoint is a persistent, always-on service. It charges ~$0.28/hr while running (the main cost in this project). One endpoint can host many indexes.
+
+**What to watch:** Endpoint creation takes 5–10 minutes. The cell polls until status = `ONLINE`.
+
+---
+
+### Cell 9 — Create the Vector Search index
+
+**What it does:** Creates a Delta Sync index on the `airflow_docs_chunks` table using the BGE Large embedding model.
+
+**Key concept — Delta Sync index:**  
+A Delta Sync index reads directly from your Delta Table. When you add new documents (update the Delta Table), the index syncs automatically using CDF — no manual re-indexing.
+
+**Key concept — BGE Large:**  
+`databricks-bge-large-en` is a 1024-dimension embedding model. It converts each chunk of text into a 1024-element vector. Chunks with similar meaning produce vectors that are close together in 1024-dimensional space — this is what makes semantic search possible.
+
+**What to watch:** Index creation takes 5–15 minutes depending on document volume. Wait for status = `ONLINE` before running the next cell.
+
+---
+
+### Cell 10 — Test a direct similarity search
+
+**What it does:** Runs a raw similarity search against the index (no LLM involved) to verify the retrieval is working.
+
+**What to look for:** The returned chunks should be semantically relevant to your test query. If they're not, the chunking or embedding step may need adjustment.
+
+---
+
+### Cell 11 — Build the LangChain retriever
+
+**What it does:** Wraps the Vector Search index as a LangChain `Retriever` — the standard interface for "given a query, return the top-k relevant documents".
+
+**Key concept — k (number of retrieved chunks):**  
+`k=4` means the retriever returns the 4 most similar chunks for every query. More chunks = more context for the LLM but also a longer prompt (higher latency and cost). 3–5 is typical.
+
+---
+
+### Cell 12 — Build the full RAG chain
+
+**What it does:** Assembles the complete RAG pipeline:
+1. User query → embedding → vector search → top-4 chunks
+2. Chunks formatted into a context block inside the prompt template
+3. Prompt sent to the LLM (`databricks-gpt-oss-20b`)
+4. LLM generates a grounded answer
+
+**Key concept — system prompt:**  
+The prompt template instructs the LLM to answer using ONLY the provided context. This is the primary technique for preventing hallucination in RAG systems.
+
+```
+"You are a technical assistant for Apache Airflow.
+ Answer using ONLY the provided context.
+ If context is insufficient, say: I do not have enough context.
+
+ Context:
+ [retrieved chunks]
+
+ Question: [user query]
+
+ Answer:"
+```
+
+---
+
+### Cell 13 — Test the chain
+
+**What it does:** Runs 5 sample questions through the full chain and prints answers with source citations.
+
+**What good output looks like:**
+- Answer directly addresses the question
+- Answer references specific Airflow concepts from the docs
+- Source files are Airflow documentation pages (not random web content)
+
+---
+
+### Cells 14–15 — Create evaluation dataset and run evaluation
+
+**What it does:** Tests the chain against a "golden dataset" — questions paired with human-verified correct answers. An LLM judge scores each answer on groundedness (1-5) and relevance (1-5).
+
+**Key concept — evaluation:**  
+LLM outputs are probabilistic — the same question can produce slightly different answers on each run. Evaluation creates a repeatable quality benchmark so you can measure whether a change (new prompt, more chunks, different LLM) actually improves the system.
+
+**Target score:** 4/5+ groundedness means the answer is well-supported by retrieved context.
+
+---
+
+### Cells 16–17 — Save results and display summary
+
+**What it does:** Persists evaluation results to a Delta Table for longitudinal tracking, then prints a formatted summary table.
+
+---
+
+### Cell 18 — Interactive testing
+
+**What it does:** Provides a simple loop for asking freeform questions not in the evaluation set.
+
+**Tip:** Try edge-case questions like "What is the airflow.cfg file?" — if the retrieval misses these, they're candidates for your evaluation dataset.
+
+---
+
+### Cell 19 — Cleanup
+
+**What it does:** Deletes the Vector Search endpoint and drops Unity Catalog tables.
+
+> ⚠️ **Important:** This is intentionally commented out. Uncomment only when you are fully done with the project. The cleanup is permanent.
+
+---
+
+## 5. V2 Notebook Walkthrough
+
+### `databricks_rag_mosaic_ai_v2.ipynb`
+
+V2 takes the working chain from V1 and adds the Mosaic AI production layer — model versioning, a live REST API, a shareable demo UI, and quality scoring.
+
+---
+
+### Cell 1 — Install Mosaic AI packages
+
+**What it does:** Installs `databricks-agents` (for `agents.deploy()`) and `mlflow[databricks]` (for Agent Evaluation).
+
+---
+
+### Cell 2 — Set variables + configure MLflow registry
+
+**What it does:** Configures MLflow to use Unity Catalog as the model registry with `mlflow.set_registry_uri("databricks-uc")`.
+
+**Key concept — why Unity Catalog for model registry?**  
+The default MLflow registry stores models in a workspace-local store. Unity Catalog extends this with governance — the same access controls that protect your data tables also protect your deployed model versions.
+
+---
+
+### Cell 3 — Create MLflow Experiment
+
+**What it does:** Creates a named MLflow experiment to group all model iterations for this project.
+
+**Key concept — MLflow Experiment:**  
+An experiment is like a folder for all your model runs. Every time you log a model (Cell 7), it creates a new Run inside the experiment with a unique run ID. You can compare runs side-by-side to see which prompt or configuration produced the best scores.
+
+---
+
+### Cell 4 — Rebuild the chain
+
+**What it does:** Reconstructs the LangChain retriever and QA chain after the kernel restart from Cell 1.
+
+**Why rebuild?** Python kernel restarts (Cell 1) clear all in-memory objects. The Vector Search index and Delta Table persist on disk — we just need to reconnect to them.
+
+---
+
+### Cell 5 — Wrap chain in MLflow ChatModel
+
+**What it does:** Writes the `RAGChainModel` class to a Python file that MLflow will package with the model artefact.
+
+**Key concept — `mlflow.pyfunc.ChatModel`:**  
+This base class makes your chain behave like an OpenAI Chat API endpoint. Any client that can call OpenAI's API (SDKs, LangChain, curl) can call your endpoint without any changes.
+
+**Why write to a file?** MLflow needs a file path (not an in-memory class) so it can package and reproduce the exact model in any environment — your notebook, the serving endpoint, or a colleague's workspace.
+
+---
+
+### Cell 6 — Local test before logging
+
+**What it does:** Tests the `RAGChainModel.predict()` method in the notebook before committing to a full MLflow run.
+
+**Best practice:** Always run a local test first. MLflow logging takes 60-90 seconds — catching a Python import error before logging saves time.
+
+---
+
+### Cell 7 — Log to MLflow
+
+**What it does:** Opens an MLflow run and logs the model file with its dependencies and resource declarations.
+
+**Key concept — `resources` parameter:**  
+Declaring the Vector Search index and LLM endpoint as resources allows `agents.deploy()` to automatically configure the serving endpoint's IAM permissions. Without this, the endpoint would be blocked from calling the Vector Search API.
+
+---
+
+### Cell 8 — Register in Unity Catalog
+
+**What it does:** Promotes the logged model artefact from the MLflow run into the Unity Catalog model registry as Version 1.
+
+**What version numbers give you:**
+- `Version 1` — initial chain
+- `Version 2` — improved prompt (Cell 17)
+- `Version 3` — larger retrieval k, etc.
+
+Each version is independently deployable. You can roll back by deploying an older version number.
+
+---
+
+### Cell 9 — Deploy with `agents.deploy()`
+
+**What it does:** The Mosaic AI one-liner that provisions the full production stack:
+
+1. A serverless Model Serving endpoint with scale-to-zero
+2. A `POST /invocations` REST API endpoint
+3. A Review App — shareable chat UI (no Databricks login needed)
+4. Auto-configured IAM permissions for the declared resources
+
+**Key concept — scale-to-zero:**  
+Unlike the Vector Search endpoint (always-on, ~$0.28/hr), the Model Serving endpoint scales to zero compute when there are no requests. You only pay for actual inference time.
+
+---
+
+### Cell 10 — Wait for READY
+
+**What it does:** Polls the endpoint status every 30 seconds. First deployment takes 5–8 minutes because Databricks is provisioning the serverless container.
+
+**Subsequent deployments are faster** (~2 min) because the container image is cached.
+
+---
+
+### Cell 11 — Test the live REST API
+
+**What it does:** Calls the deployed endpoint using `mlflow.deployments.get_deploy_client()` — the same client an external application would use.
+
+**This is the portfolio money shot:** the RAG system built from scratch in V1 is now a live REST API. Any web application, mobile app, or data pipeline can call it.
+
+---
+
+### Cell 12 — MLflow Tracing
+
+**What it does:** Wraps the RAG chain with `@mlflow.trace` to record every step of every request.
+
+**Key concept — why tracing matters:**  
+When the chain gives a wrong answer, you need to know whether the problem is:
+- **Retrieval failure:** the wrong chunks were returned (check the RETRIEVER span)
+- **Generation failure:** good chunks were returned but the LLM ignored them (check the LLM span)
+
+Without tracing, distinguishing between these two failure modes requires guesswork.
+
+**View traces:** Experiments → airflow_rag_v2 → Traces tab.
+
+---
+
+### Cell 13 — Create evaluation dataset
+
+**What it does:** Defines 5 questions with human-verified correct answers (ground truth).
+
+**Why 5 pairs is enough for a demo:**  
+In production, you'd want 50–200 pairs. For a portfolio demonstration of the evaluation pattern, 5 pairs is sufficient to show the methodology without requiring domain expert input.
+
+**Customise:** Replace the QA pairs with domain-specific questions for your own knowledge base.
+
+---
+
+### Cell 14 — Run Agent Evaluation
+
+**What it does:** Runs each question through the chain and scores the output using a groundedness scorer.
+
+**The scoring function:** Computes word-overlap between the chain answer and the expected answer, then scales it to a 1–5 integer. In production, Mosaic AI provides LLM judges (requiring `mlflow.evaluate` with `model_type='databricks-agent'`) that score groundedness, relevance, and retrieval precision independently.
+
+---
+
+### Cell 15 — View evaluation results
+
+**What it does:** Prints a formatted scorecard for each question.
+
+**How to use these results:**
+- Score 4–5: good, no action needed
+- Score 2–3: investigate — was the right chunk retrieved? Was the answer too short?
+- Score 1: retrieval failure — check the Vector Search index for this document type
 
 ---
 
 ### Cell 16 — Explore the Review App
 
-**What it does:** Prints the Review App URL from Cell 9 and explains how to use it.
+**What it does:** Prints the Review App URL and instructions for using it.
 
-**What the Review App looks like:**  
-A chat interface similar to ChatGPT or Claude.  
-On the right panel, it shows the source document chunks used to generate the answer.  
-This "show your work" feature builds trust with non-technical stakeholders.
-
-**Portfolio tip:** Take a screenshot of the Review App answering a question correctly.  
-Add it to your GitHub README under a "Live Demo" section. This is the most impactful  
-visual you can add to a portfolio project.
+**Key concept — Review App:**  
+The Review App is a polished chat UI created automatically by `agents.deploy()`. Sharing it with a hiring manager, client, or colleague is more impactful than showing a notebook — they interact with the actual deployed agent without needing Databricks access.
 
 ---
 
-### Cell 17 — Version 2: Improve and Re-deploy
+### Cell 17 — Improve and re-deploy
 
-**What it does:** Demonstrates the iterative improvement cycle.
+**What it does:** Demonstrates the RAG improvement cycle:
 
-**The MLOps cycle in practice:**
 ```
-Evaluate V1 → identify weak questions → improve prompt → run Cells 5→7→8 → evaluate V2 → compare
+Evaluate V1 → identify weak questions → improve prompt → log V2 → evaluate V2 → compare
 ```
 
-**What changed in the V2 prompt:**
-- Added: "Mention specific Airflow operators, parameters, or code patterns when relevant"
-- Added: "Use bullet points for multi-step answers"
+The improved prompt adds expert-level instructions: use specific operator names, include code examples, structure multi-step answers with bullet points.
 
-These instructions guide the LLM to be more precise and actionable — which improves  
-groundedness scores for questions about specific Airflow features.
-
-After validating the improved answers, re-run Cells 5 → 7 → 8 to register Version 2  
-in Unity Catalog alongside Version 1.
+**To register V2:** After validating the improved answers, set `qa_chain = qa_chain_v2` and re-run Cells 5 → 7 → 8.
 
 ---
 
 ### Cell 18 — Cleanup
 
-**What it does:** Provides commented-out code to delete the serving endpoint.
+**What it does:** Deletes the Model Serving endpoint (commented out for safety).
 
-**When to run it:**  
-After your demo session is complete and you no longer need the endpoint.
-
-**What you do NOT need to delete:**  
-- Delta Tables (no ongoing cost)
-- Unity Catalog model registry entries (no ongoing cost)
-- MLflow experiment runs (no ongoing cost)
-
-**What you DO need to delete to stop charges:**  
-- Vector Search endpoint (V1, Cell 19) — ~$0.28/hr always-on
-- Model Serving endpoint — this one (scale-to-zero, effectively free when idle)
+> ⚠️ **Important:** The cell is intentionally commented out. Uncomment only when finished.
 
 ---
 
-### Cell 19 — Portfolio Summary
+### Cell 19 — Portfolio summary
 
-**What it does:** Prints a summary of the complete V1 + V2 skill set.
-
-**How to use this in interviews:**  
-When asked "walk me through a project", this output gives you a structured answer  
-covering both data engineering (V1) and AI engineering/MLOps (V2).
+**What it does:** Prints a complete list of all skills demonstrated by V1 + V2 combined. Use this as a reference for your CV or interview talking points.
 
 ---
 
-## Concepts Glossary
+## 6. Key Concepts Glossary
 
-| Term | Plain-English meaning |
+| Term | Plain-English definition |
 |---|---|
-| **MLflow Run** | One experiment iteration — a snapshot of a model and its metadata |
-| **Model URI** | The unique address of a logged model, e.g. `models:/rag_portfolio...` |
-| **PyFunc** | MLflow's generic model format — wraps any Python object into a deployable model |
-| **ChatModel** | A PyFunc subclass with an OpenAI-compatible chat interface |
-| **`load_context()`** | The method called once when a serving endpoint loads a model — like `__init__` |
-| **`predict()`** | The method called on every inference request — like a web handler |
-| **scale-to-zero** | The serving endpoint stops consuming compute when idle — zero cost when unused |
-| **Review App** | A shareable chat UI Databricks creates alongside a deployed agent endpoint |
-| **Groundedness** | A quality measure: is the answer supported by the retrieved context, or hallucinated? |
-| **LLM judge** | An LLM used to automatically score another LLM's outputs |
-| **Resources declaration** | Listing the Databricks services a model depends on, so IAM permissions are auto-configured |
-| **Span** | One step inside a traced function call (e.g., RETRIEVER span, LLM span) |
+| **Embedding** | A list of numbers (vector) that represents the meaning of a text passage. Similar passages have similar vectors. |
+| **Vector Search** | A database that finds the most semantically similar vectors to a query vector — like a "meaning search" rather than keyword search. |
+| **HNSW** | Hierarchical Navigable Small World — the indexing algorithm used by Vector Search for fast approximate nearest-neighbour lookup. |
+| **Chunk** | A short passage of text (200-1000 characters) split from a longer document for embedding. |
+| **Retriever** | The component that takes a query, embeds it, and returns the top-k most similar chunks from the vector store. |
+| **Grounding** | Constraining the LLM to answer using only retrieved context — the main technique for preventing hallucination in RAG. |
+| **Delta Sync** | Automatic incremental sync from a Delta Table to a Vector Search index using Change Data Feed. |
+| **CDF** | Change Data Feed — Delta Lake feature that tracks row-level changes (insert/update/delete) for efficient downstream sync. |
+| **Unity Catalog** | Databricks' centralised data governance layer — manages access to tables, models, and files with a single permission model. |
+| **MLflow Run** | A logged experiment iteration with artefacts (model files), metrics (evaluation scores), and parameters (chunk size, k value). |
+| **PyFunc** | MLflow's generic Python model format — wraps any Python class as a deployable model with `predict()` method. |
+| **ChatModel** | MLflow base class that produces OpenAI-compatible Chat API responses — enables plug-and-play with any OpenAI client. |
+| **agents.deploy()** | Mosaic AI one-liner that provisions a serving endpoint + Review App from a registered model version. |
+| **Scale-to-zero** | Serving endpoint feature that reduces compute to zero when idle — no cost when the API is not being called. |
+| **Groundedness score** | Evaluation metric measuring whether the answer is supported by the retrieved context rather than hallucinated. |
+| **LLM Judge** | An LLM used to evaluate the output of another LLM — common in RAG evaluation because human annotation is slow and expensive. |
 
 ---
 
-## Troubleshooting Common Errors
+## 7. Troubleshooting
 
-| Error | What it means | Fix |
+| Error | Likely cause | Fix |
 |---|---|---|
-| `ModuleNotFoundError: rag_chain_model` | Cell 5 not yet run in this session | Re-run Cell 5 |
-| `ENDPOINT_NOT_FOUND` | V1 Vector Search endpoint was deleted | Re-run Cells 7–10 in `databricks_rag_vector_search.ipynb` |
-| Kernel restarted unexpectedly after Cell 1 | Normal behaviour — `restartPython()` is intentional | Start from Cell 2 |
-| `CreateModelVersion` permission denied | Missing `CREATE MODEL` privilege | Add via: Catalog → rag_portfolio → Permissions |
-| `agents.deploy()` returns immediately but endpoint is NOT_READY | Provisioning takes time | Cell 10 handles this — just wait |
-| Review App returns 404 | Endpoint still provisioning | Wait until Cell 10 prints `READY` |
-| Evaluation scores all 1–2 | Wrong chunks being retrieved | Check VS index is ONLINE in Vector Search UI |
-| `FutureWarning: ChatModel deprecated` | MLflow 3.x renamed the API | Safe to ignore for now; use `ResponsesAgent` for MLflow 3+ projects |
+| `PermissionDenied: CREATE CATALOG` | Databricks account lacks catalog creation privileges | Ask workspace admin for `CREATE CATALOG` grant |
+| `VectorSearchClientException: Endpoint not found` | Vector Search endpoint not yet ONLINE | Wait for Cell 8 polling to show ONLINE |
+| `Index not found` | V1 not run before V2 | Run `databricks_rag_vector_search.ipynb` fully first |
+| `ModuleNotFoundError` after kernel restart | Package install didn't complete | Re-run Cell 1 and wait for the full restart |
+| `NameError: qa_chain is not defined` | Kernel was restarted and Cell 4 not re-run | Re-run Cell 4 to rebuild the chain |
+| Serving endpoint stays `PROVISIONING` > 15 min | Transient Databricks infrastructure issue | Delete the endpoint, wait 5 min, re-run Cell 9 |
+| Low groundedness scores (<3) | Wrong chunks retrieved, or prompt too permissive | Print the retrieved chunks for the failing question; increase k or adjust the prompt |
 
 ---
 
-## What to Explore Next
+## 8. Next Steps
 
-Once this notebook is running, here are natural next steps to extend the project:
+Once comfortable with this project, consider these production enhancements:
 
-1. **Add more data sources** — ingest dbt docs, Spark docs, or your own internal knowledge base alongside Airflow docs
-2. **Improve chunking strategy** — experiment with different `chunk_size` and `chunk_overlap` values in V1 and measure the impact on evaluation scores
-3. **Use Mosaic AI's built-in LLM judges** — replace the word-overlap scorer with `mlflow.evaluate()` using `model_type='databricks-agent'` for production-grade scoring
-4. **Add production monitoring** — use `agents.enable_trace_reviews()` to collect user thumbs up/down feedback through the Review App
-5. **Multi-turn conversation** — extend `RAGChainModel.predict()` to pass full conversation history to the LLM rather than just the last message
-6. **CI/CD pipeline** — add a Databricks Job that re-runs evaluation automatically whenever new documents are added to the Delta Table
+**Better retrieval:**
+- Hybrid search (BM25 keyword + vector) — catches exact-match queries that semantic search misses
+- Metadata filtering — restrict search to a specific document type or date range
+- Re-ranker model — a second-stage model that reorders retrieved chunks by relevance
+
+**Better generation:**
+- Streaming responses — stream tokens to the UI for perceived lower latency
+- Citation injection — automatically append source links to every answer
+- Multi-turn conversation — pass conversation history to the LLM for contextual follow-ups
+
+**Production MLOps:**
+- A/B testing — deploy two model versions to the same endpoint, split traffic 80/20
+- Automated evaluation pipeline — trigger re-evaluation on every model update using Databricks Workflows
+- Feedback loop — capture thumbs up/down from Review App and add weak questions to the evaluation dataset
+
+**Scale:**
+- Databricks Workflows for scheduled incremental re-indexing
+- Auto Loader for continuous document ingestion
+- Unity Catalog data lineage — track which source documents produced which evaluation results
 
 ---
 
-*Built by Ravi Amaraweera — Senior Data Architect / Analytics Engineer*
+*Built and documented by Ravi Amaraweera — Senior Data Architect / Analytics Engineer*
